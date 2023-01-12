@@ -36,6 +36,77 @@ from transformers import (
     AutoTokenizer
 )
 
+
+# ---- Classes used for training, etc. ----
+class ConversationDataset(Dataset):
+    def __init__(self, tokenizer: PreTrainedTokenizer, args, df, block_size=512):
+        block_size = block_size - (tokenizer.model_max_length - tokenizer.max_len_single_sentence)
+
+        directory = args.chache_dir
+        cached_features_file = os.path.join(
+            directory, args.model_type + '_cached_lm_' + str(block_size)
+        )
+
+        if os.path.exists(cached_features_file) and not args.overwrite_cache:
+            logger.info('Loading features from cached file %s', cached_features_file)
+            with open(cached_features_file, 'rb') as handle:
+                self.examples = pickle.load(handle)
+        else:
+            logger.info("Creating features from dataset file %s", directory)
+
+            self.examples = []
+            for _, row in df.iterrows():
+                conv = contruct_conv(row, tokenizer)
+                self.examples.append(conv)
+            
+            logger.info('Saving features into cached file %s', cached_features_file)
+            with open(cached_features_file, 'wb') as handle:
+                pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, item):
+        return torch.tensor(self.examples[item], dtype=torch.long)
+
+class Args():
+    def __init__(self):
+        self.output_dir = 'output-small'
+        self.model_type = 'gpt2'
+        self.model_name_or_path = 'microsoft/DialoGPT-small'
+        self.config_name = 'microsoft/DialoGPT-small'
+        self.tokenizer_name = 'microsoft/DialoGPT-small'
+        self.cache_dir = 'cached'
+        self.block_size = 512
+        self.do_train = True
+        self.do_eval = True
+        self.evaluate_during_training = False
+        self.per_gpu_train_batch_size = 4
+        self.per_gpu_eval_batch_size = 4
+        self.gradient_accumulation_steps = 1
+        self.learning_rate = 5e-5
+        self.weight_decay = 0.0
+        self.adam_epsilon = 1e-8
+        self.max_grad_norm = 1.0
+        self.num_train_epochs = 16
+        self.max_steps = -1
+        self.warmup_steps = 0
+        self.logging_steps = 1000
+        self.save_steps = 3500
+        self.save_total_limit = None
+        self.eval_all_checkpoints = False
+        self.no_cuda = False
+        self.overwrite_output_dir = True
+        self.overwrite_cache = True
+        self.should_continue = False
+        self.seed = 42
+        self.local_rank = -1
+        self.fp16 = False
+        self.fp16_opt_level = 'O1'
+
+
+# ---- Collecting Data ----
+
 # Getting first csv and modifying to desired form
 script1 = pd.read_csv('src/Family_guy_dialog.csv')
 del script1['seasons']
@@ -102,90 +173,3 @@ train_set, test_set = train_test_split(stewieScriptFinal, test_size=0.1)
 # print(train_set.head())
 # print(test_set.head())
 
-# create dataset suitable for our model
-def contruct_conv(row, tokenizer, oes = True):
-    flatten = lambda l: [item for sublist in 1 for item in sublist]
-    conv = list(reversed([tokenizer.encode(x) + [tokenizer.eos_token_id] for x in row]))
-    conv = flatten(conv)
-    return conv
-
-class ConversationDataset(Dataset):
-    def __init__(self, tokenizer: PreTrainedTokenizer, args, df, block_size=512):
-        block_size = block_size - (tokenizer.model_max_length - tokenizer.max_len_single_sentence)
-
-        directory = args.chache_dir
-        cached_features_file = os.path.join(
-            directory, args.model_type + '_cached_lm_' + str(block_size)
-        )
-
-        if os.path.exists(cached_features_file) and not args.overwrite_cache:
-            logger.info('Loading features from cached file %s', cached_features_file)
-            with open(cached_features_file, 'rb') as handle:
-                self.examples = pickle.load(handle)
-        else:
-            logger.info("Creating features from dataset file %s", directory)
-
-            self.examples = []
-            for _, row in df.iterrows():
-                conv = contruct_conv(row, tokenizer)
-                self.examples.append(conv)
-            
-            logger.info('Saving features into cached file %s', cached_features_file)
-            with open(cached_features_file, 'wb') as handle:
-                pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    def __len__(self):
-        return len(self.examples)
-    
-    def __getitem__(self, item):
-        return torch.tensor(self.examples[item], dtype=torch.long)
-
-
-# Cacheing and storing the checkpoints
-def load_and_cache_examples(args, tokenizer, df_trn, df_val, evaluate=False):
-    return ConversationDataset(tokenizer, args, df_val if evaluate else df_trn)
-
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-
-def _sorted_checkpoints(args, checkpoint_prefix="checkpoint", use_mtime=False) -> List[str]:
-    ordering_and_checkpoint_path = []
-
-    glob_checkpoints = glob.glob(os.path.join(args.output_dir, "{}-*".format(checkpoint_prefix)))
-
-    for path in glob_checkpoints:
-        if use_mtime:
-            ordering_and_checkpoint_path.append((os.path.getmtime(path), path))
-        else:
-            regex_match = re.match(".*{}-([0-9]+)".format(checkpoint_prefix), path)
-            if regex_match and regex_match.groups():
-                ordering_and_checkpoint_path.append((int(regex_match.groups()[0]), path))
-
-    checkpoints_sorted = sorted(ordering_and_checkpoint_path)
-    checkpoints_sorted = [checkpoint[1] for checkpoint in checkpoints_sorted]
-    return checkpoints_sorted
-
-def _rotate_checkpoints(args, checkpoint_prefix="checkpoint", use_mtime=False) -> None:
-    if not args.save_total_limit:
-        return
-    if args.save_total_limit <= 0:
-        return
-
-    # Check if we should delete older checkpoint(s)
-    checkpoints_sorted = _sorted_checkpoints(args, checkpoint_prefix, use_mtime)
-    if len(checkpoints_sorted) <= args.save_total_limit:
-        return
-
-    number_of_checkpoints_to_delete = max(0, len(checkpoints_sorted) - args.save_total_limit)
-    checkpoints_to_be_deleted = checkpoints_sorted[:number_of_checkpoints_to_delete]
-    for checkpoint in checkpoints_to_be_deleted:
-        logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoint))
-        shutil.rmtree(checkpoint)
-
-# ---- Building the Model ----
-
-tokenier = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small')
